@@ -1,0 +1,75 @@
+services:
+  router:
+    build:
+      context: ./router
+    image: legion-llm-mini/router:latest
+    container_name: router
+    env_file:
+      - ./.env
+      - ./configs/router.env
+    ports:
+      - "${ROUTER_PORT}:8088"
+    depends_on:
+      - prefill
+      # - decode
+
+  prefill:
+    image: vllm/vllm-openai:v0.10.1
+    container_name: prefill
+    gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - VLLM_USE_FLASHINFER_ATTENTION=0
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_TORCH_LOGS=0
+    env_file:
+      - ./.env
+    command: >
+      --model ${MODEL_ID}
+      --dtype auto
+      --max-model-len ${MAX_MODEL_LEN}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}
+      --swap-space ${SWAP_SPACE_GB}
+      --cpu-offload-gb ${CPU_OFFLOAD_GB}
+      --enable-prefix-caching
+      --enforce-eager
+      --generation-config vllm
+      --host 0.0.0.0
+      --port 8010
+    ports:
+      - "${PREFILL_PORT}:8010"
+    volumes:
+      - ./data/kv_cache:/data/kv_cache
+      - ./models:/models
+
+  # decode:
+  #   image: vllm/vllm-openai:v0.10.1
+  #   container_name: decode
+  #   gpus: all
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+  #     - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+  #     - VLLM_USE_FLASHINFER_ATTENTION=0
+  #     - VLLM_USE_FLASHINFER_SAMPLER=0
+  #     - VLLM_TORCH_LOGS=0
+  #   env_file:
+  #     - ./.env
+  #   command: >
+  #     --model ${MODEL_ID}
+  #     --dtype auto
+  #     --max-model-len ${MAX_MODEL_LEN}
+  #     --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}
+  #     --swap-space ${SWAP_SPACE_GB}
+  #     --cpu-offload-gb ${CPU_OFFLOAD_GB}
+  #     --enable-prefix-caching
+  #     --enforce-eager
+  #     --host 0.0.0.0
+  #     --port 8020
+  #   ports:
+  #     - "${DECODE_PORT}:8020"
+  #   volumes:
+  #     - ./data/kv_cache:/data/kv_cache
+  #     - ./models:/models
