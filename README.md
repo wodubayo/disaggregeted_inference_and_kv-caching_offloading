@@ -1,49 +1,103 @@
 
-# legion-llm-mini — Disaggregated Inference + KV Offload (Single-GPU)
+# Disaggregated Inference + KV Offload (Single-GPU)
 
-This is a **self-contained mini project** that emulates **disaggregated prefill/decode** and **KV-cache offloading** on a single Lenovo Legion GPU, **without touching your other projects**.
+This repository demonstrates a modular setup for **disaggregated inference**, where prefill and decode stages of an LLM pipeline are separated into individual backends. The architecture supports **KV-cache offloading, CPU/GPU memory partitioning**, and **router-level orchestration**, designed for experimentation on constrained hardware (e.g., RTX 2080, 16-32 GB RAM).
 
-It uses **Docker Compose** with **vLLM** (for PagedAttention + LMCache) and a tiny **FastAPI router** that routes requests to separate **prefill** and **decode** services.
-Both services share the same LMCache directory so prefill warms the cache and decode reuses it.
+## 💡 Motivation & Hardware Context
 
-> This is a learning scaffold. Real disaggregation usually runs on separate GPU pools or nodes. On a single GPU laptop, the two services will share the device and time-slice, but the architecture and configs map 1:1 to bigger clusters later.
+This project was built to explore how large-language-model inference can be disaggregated across limited-resource devices — an approach usually reserved for enterprise-grade clusters.
+It’s part of a broader effort to understand distributed AI system design and inference optimization at both the software and hardware levels.
 
----
+I’m currently experimenting on a Lenovo Legion laptop configured with:
 
-## What you get
-- **Safe isolation** via Docker (no conda/env pollution, no global CUDA changes).
-- **KV offload** to host RAM and disk using vLLM's LMCache + swap-space flags.
-- **Router** with simple prefix-hash awareness to simulate cache-aware routing.
-- Minimal, explicit **env files** and **volume mounts** under this project folder only.
+|Component	    |   Specification                         |
+|---------------|-----------------------------------------|
+|GPU	          | NVIDIA RTX 2080 Super (Max-Q, 8 GB VRAM)|
+|CPU	          | Intel i7 – 10th Gen, 8 Cores            |
+|Memory	        | 32 GB DDR4 RAM                          |
+|Storage	      | 1 TB NVMe SSD                           |
+|OS	            | Ubuntu 22.04 LTS                        |
+|Docker Runtime | NVIDIA Container Toolkit + CUDA 12.x    |
+
+Because the 2080 Super lacks the compute capability (≥ 8.0) required for advanced FlashAttention v2 and tensor-parallel inference, I implemented a lightweight, V0 inference engine configuration with router-mediated offloading.
+The goal was to simulate large-scale inference splitting (prefill vs. decode) using a single-GPU environment with CPU KV-cache offloading — proving that efficient orchestration is possible even under tight memory constraints.
+
+## 🚀 Features
+- 🧩 Modular design — independent router, prefill, and (optional) decode services
+- ⚙️ Docker Compose orchestration — single command brings up the whole stack
+- 🧠 FastAPI router — acts as a lightweight load balancer and OpenAI-compatible proxy
+- 💾 KV-cache offload — explore CPU or disk-based caching via mounted volumes
+- 🔄 OpenAI API compatibility — supports /v1/completions, /v1/chat/completions, and /v1/models
+- 🔍 Extendable — add Prometheus metrics, decoding backends, or caching policies later
 
 ## Prereqs
 - NVIDIA driver + CUDA runtime (already on your Legion).
 - Docker Desktop or Docker Engine with **nvidia-container-toolkit**.
 - `docker compose version` ≥ 2.20.
 
+## 🏗️ Architecture Overview
+```bash
+        ┌──────────────────────────────┐
+        │          Router              │
+        │  FastAPI + HTTPX Proxy       │
+        │  - Routes /generate, /v1/*   │
+        │  - Health checks             │
+        └───────▲───────────┬──────────┘
+                │           │
+       ┌────────┘           └────────┐
+┌────────────┐               ┌────────────┐
+│  Prefill   │               │  Decode    │
+│ vLLM OpenAI│               │ vLLM       │
+│  /v1 API   │               │  /v1 API   │
+└────────────┘               └────────────┘
+   (GPU A)                       (GPU B)
+```
+In this repo, only the prefill backend is active by default.
 ## Quickstart
 ```bash
-# From this project root:
-./scripts/setup_dirs.sh      # creates local folders and permissions
-docker compose pull          # pull images
-docker compose up -d         # start router, prefill, decode
+# 1️⃣ Clone & enter project
+git clone https://github.com/wodubayo/disaggregated-inference-kv-caching.git
+cd disaggregated-inference-kv-caching
 
-# Test
-curl -s http://localhost:8088/healthz
-curl -s http://localhost:8088/generate -H "Content-Type: application/json" -d '{
-  "prompt": "Explain Rossby number in oceanography in 5 sentences.",
-  "max_tokens": 128,
-  "temperature": 0.2
-}'
+# 2️⃣ Copy and edit environment variables
+cp .env.example .env
+# Optional: add HUGGING_FACE_HUB_TOKEN if needed
+
+# 3️⃣ Build and start services
+docker compose build router
+docker compose up -d
+
+# 4️⃣ Verify everything is live
+curl -sS http://127.0.0.1:8088/healthz | jq .
+curl -sS http://127.0.0.1:8088/v1/models | jq .
 ```
 
-## Model selection
-By default we set `MODEL_ID=meta-llama/Llama-3.1-8B-Instruct` (HF). You can change this in `configs/model.env`.
-> Note: using an 8B model is recommended on a laptop GPU. Larger models may OOM.
-
-## Folder layout
+## 🧪 Example Queries
+Text Completion
+```bash
+curl -sS http://127.0.0.1:8088/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "prompt": "Explain the Rossby number in one line.",
+    "max_tokens": 32
+  }' | jq .
 ```
-legion-llm-mini/
+Chat completion
+```bash
+curl -sS http://127.0.0.1:8088/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "messages": [
+      {"role": "user", "content": "Say hi."}
+    ],
+    "max_tokens": 16
+  }' | jq .
+```
+
+## Repo Layout
+```bash
 ├─ docker-compose.yml
 ├─ .env
 ├─ README.md
@@ -61,25 +115,60 @@ legion-llm-mini/
 └─ models/             # optional local models
 ```
 
-## How disaggregation is emulated here
-- **prefill** service: receives the initial prompt to build KV. (Our router sends the first call here.)
-- **decode** service: receives follow-up generation using the same prefix; since both share `data/kv_cache`, vLLM can reuse KV pages from disk/host memory if beneficial.
+## 🧠 Environment Variables
+| Variable                 | Description                 | Default                      |
+| ------------------------ | --------------------------- | ---------------------------- |
+| `MODEL_ID`               | Hugging Face model ID       | `Qwen/Qwen2.5-1.5B-Instruct` |
+| `MAX_MODEL_LEN`          | Max sequence length         | `2048`                       |
+| `GPU_MEMORY_UTILIZATION` | Fraction of GPU VRAM to use | `0.55`                       |
+| `SWAP_SPACE_GB`          | Swap allocation             | `8`                          |
+| `CPU_OFFLOAD_GB`         | CPU memory for offload      | `8`                          |
+| `PREFILL_PORT`           | vLLM backend port           | `8010`                       |
+| `ROUTER_PORT`            | Router external port        | `8088`                       |
 
-**vLLM flags we use:**
-- `--swap-space <GB>` → use host RAM for KV paging
-- `--enable-lmcache` + `--lmcache-path /data/kv_cache` → on-disk KV paging
+## Model selection
+> Using an 8B model is the upper bound for consumer GPUs (~8 GB VRAM).  
+> For smoother runs on limited memory, try `Qwen/Qwen2.5-1.5B-Instruct` or `mistralai/Mistral-7B-Instruct-v0.3`.
+
+You can change this in `configs/model.env`.
+---
+
+## How Disaggregation Is Emulated Here
+- **Prefill service:** handles the initial prompt to build the key-value (KV) cache.  
+- **Decode service:** performs follow-up generation using the same prefix.  
+- Both containers share `/data/kv_cache`, allowing vLLM to reuse cached tensors and emulate inter-node KV reuse.
+
+This setup does not perform true multi-node streaming yet; instead, it **simulates disaggregation via shared disk-based KV cache**.
+
+---
+
+## vLLM Flags Used
+- `--swap-space <GB>` → enables host RAM paging for KV  
+- `--enable-lmcache` + `--lmcache-path /data/kv_cache` → enables on-disk KV reuse  
+- *(Optional)* `--gpu-memory-utilization 0.6` → limits GPU VRAM usage  
+- *(Optional)* `--tensor-parallel-size 1` → single-GPU inference mode  
+
+---
 
 ## Ports
-- Router: `8088`
-- Prefill vLLM OpenAI API: `8010`
-- Decode vLLM OpenAI API: `8020`
+| Service | Port | Role |
+|----------|------|------|
+| Router | 8088 | API Gateway |
+| Prefill | 8010 | KV Construction |
+| Decode | 8020 | Token Generation |
 
-## Clean-up
+---
+
+## Clean-Up
 ```bash
-docker compose down
-./scripts/down.sh       # removes volumes if you want a fresh slate
+docker compose down           # stops containers
+./scripts/down.sh             # optional: removes volumes & cache
 ```
 
 ## Notes
-- This doesn’t modify global CUDA or any of your other projects; everything stays inside this folder and Docker volumes.
-- On first run, model weights will be downloaded into the `prefill` and `decode` containers' cache (~HF cache inside the container) unless you mount `models/` with your own weights.
+- Fully containerized — no global CUDA configuration changes.
+- On first run, model weights are downloaded into the container’s cache (~HF cache).
+- To persist weights:
+  ```bash
+  -v ./models:/root/.cache/huggingface
+  ```
